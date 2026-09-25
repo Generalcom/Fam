@@ -14,14 +14,13 @@ import {
 } from '@/components/auth-ui';
 import { IdCamera } from '@/components/id-camera';
 import { IdScanner, type ScanKind, type ScanResult } from '@/components/id-scanner';
-import { LivenessCamera } from '@/components/liveness-camera';
-import type { IdRead } from '@/lib/id-parse';
+import { SelfieCamera } from '@/components/selfie-camera';
 import { checkPassportNumber, checkSaId, cleanFullName } from '@/lib/id-number';
-import { DOCUMENTS, photoSource, submitKyc, type DocumentOption, type LivenessResult, type Photo, type ScanNote } from '@/lib/kyc';
+import { DOCUMENTS, photoSource, submitKyc, type DocumentOption, type Photo, type ScanNote, type SelfieResult } from '@/lib/kyc';
 import { useAuth } from '@/providers/auth';
 import { useKyc } from '@/providers/kyc';
 
-type Step = 'intro' | 'document' | 'front' | 'back' | 'details' | 'selfie' | 'selfie-camera' | 'sending' | 'failed';
+type Step = 'intro' | 'document' | 'front' | 'back' | 'details' | 'selfie' | 'selfie-camera' | 'sending' | 'failed' | 'submitted';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const niceDate = (iso: string) => `${Number(iso.slice(8, 10))} ${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)}`;
@@ -53,7 +52,7 @@ export default function Verify() {
   usePreventScreenCapture();
   const t = useAuthTheme();
   const { session } = useAuth();
-  const { status, rejectReason, refresh, skipForDev } = useKyc();
+  const { status, rejectReason, refresh, skipForDev, setJustSubmitted } = useKyc();
 
   const [step, setStep] = useState<Step>('intro');
   const [agreed, setAgreed] = useState(false);
@@ -62,12 +61,10 @@ export default function Verify() {
   const [back, setBack] = useState<Photo | null>(null);
   const [frontNote, setFrontNote] = useState<ScanNote | null>(null);
   const [backNote, setBackNote] = useState<ScanNote | null>(null);
-  const [frontRead, setFrontRead] = useState<IdRead | null>(null);
-  const [prefilled, setPrefilled] = useState(false);
   const [basicCamera, setBasicCamera] = useState(false);
   const [fullName, setFullName] = useState('');
   const [idNumber, setIdNumber] = useState('');
-  const [liveness, setLiveness] = useState<LivenessResult | null>(null);
+  const [selfie, setSelfie] = useState<SelfieResult | null>(null);
   const [sent, setSent] = useState<{ done: number; total: number }>({ done: 0, total: 1 });
   const [failure, setFailure] = useState('');
 
@@ -88,8 +85,10 @@ export default function Verify() {
     setStep(step === 'selfie' ? 'details' : step === 'details' ? 'document' : 'intro'),
   );
 
-  async function send(result: LivenessResult) {
+  async function send(result: SelfieResult) {
     if (!session || !front || !frontNote) return;
+    // Keeps this screen up (for the "up to 15 minutes" page) once the submission shows as pending.
+    setJustSubmitted(true);
     setStep('sending');
     setSent({ done: 0, total: 1 });
     try {
@@ -104,13 +103,14 @@ export default function Verify() {
           back: doc.backTitle ? back : null,
           frontNote,
           backNote: doc.backTitle ? backNote : null,
-          read: frontRead,
-          liveness: result,
+          selfie: result,
         },
         (done, total) => setSent({ done, total }),
       );
-      await refresh();
+      setStep('submitted');
+      void refresh();
     } catch (e) {
+      setJustSubmitted(false);
       setFailure((e as Error).message);
       setStep('failed');
     }
@@ -129,7 +129,6 @@ export default function Verify() {
           onCapture={(uri) => {
             setFront({ uri });
             setFrontNote({ via: 'basic' });
-            setFrontRead(null);
             next();
           }}
           onCancel={cancel}
@@ -142,15 +141,9 @@ export default function Verify() {
         kind={scanKind('front')}
         title={doc.frontTitle}
         ratio={doc.ratio}
-        read
         onCapture={(r) => {
           setFront({ base64: r.base64 });
           setFrontNote(noteOf(r));
-          setFrontRead(r.ocrRan ? r.read : null);
-          let filled = false;
-          if (r.read.idNumber) { setIdNumber(r.read.idNumber); filled = true; }
-          if (r.read.fullName) { setFullName(r.read.fullName); filled = true; }
-          setPrefilled(filled);
           next();
         }}
         onCancel={cancel}
@@ -182,7 +175,6 @@ export default function Verify() {
         kind={scanKind('back')}
         title={doc.backTitle}
         ratio={doc.ratio}
-        read={false}
         onCapture={(r) => {
           setBack({ base64: r.base64 });
           setBackNote(noteOf(r));
@@ -195,9 +187,9 @@ export default function Verify() {
   }
   if (step === 'selfie-camera') {
     return (
-      <LivenessCamera
+      <SelfieCamera
         onResult={(result) => {
-          setLiveness(result);
+          setSelfie(result);
           void send(result);
         }}
         onCancel={() => setStep('selfie')}
@@ -217,6 +209,20 @@ export default function Verify() {
     );
   }
 
+  if (step === 'submitted') {
+    return (
+      <AuthPage>
+        <View style={{ flex: 1, justifyContent: 'center', gap: 20 }}>
+          <Ionicons name="time-outline" size={56} color={t.text} style={{ alignSelf: 'center' }} />
+          <AuthTitle>Thanks, we’re checking your details</AuthTitle>
+          <AuthBody>Verifying your ID and selfie can take up to 15 minutes. You can carry on using the app in the meantime.</AuthBody>
+          <AuthBody small>If anything needs another look, we’ll ask you here to take new photos.</AuthBody>
+        </View>
+        <PillButton title="Continue" onPress={() => void refresh().then(() => setJustSubmitted(false))} />
+      </AuthPage>
+    );
+  }
+
   if (step === 'failed') {
     return (
       <AuthPage>
@@ -225,8 +231,8 @@ export default function Verify() {
           <AuthBody>{failure}</AuthBody>
         </View>
         <View style={{ gap: 12, marginTop: 32 }}>
-          <PillButton title="Try again" onPress={() => (liveness ? void send(liveness) : setStep('selfie'))} />
-          <PillButton title="Start over" variant="outline" onPress={() => { setLiveness(null); setStep('intro'); }} />
+          <PillButton title="Try again" onPress={() => (selfie ? void send(selfie) : setStep('selfie'))} />
+          <PillButton title="Start over" variant="outline" onPress={() => { setSelfie(null); setStep('intro'); }} />
         </View>
       </AuthPage>
     );
@@ -290,7 +296,7 @@ export default function Verify() {
               accessibilityRole="button"
               accessibilityLabel={`${d.title}. ${d.hint}`}
               onPress={() => {
-                if (d.id !== doc.id) { setFront(null); setBack(null); setFrontNote(null); setBackNote(null); setFrontRead(null); setPrefilled(false); setIdNumber(''); }
+                if (d.id !== doc.id) { setFront(null); setBack(null); setFrontNote(null); setBackNote(null); setIdNumber(''); }
                 setDoc(d);
                 setStep('front');
               }}
@@ -321,7 +327,6 @@ export default function Verify() {
         </View>
 
         <View style={{ gap: 14, marginTop: 20 }}>
-          {prefilled && <AuthBody small>Filled in from your ID. Please check every letter and digit.</AuthBody>}
           <PillField label="Full name" value={fullName} onChangeText={setFullName} autoCapitalize="words" autoComplete="name" textContentType="name" />
           <PillField
             label={doc.numberLabel}
@@ -346,12 +351,12 @@ export default function Verify() {
     <AuthPage onBack={() => setStep('details')}>
       <View style={{ gap: 12, marginTop: 8 }}>
         <AuthTitle>Now a quick selfie</AuthTitle>
-        <AuthBody>We’ll ask you to look straight ahead, then turn your head to the left and right.</AuthBody>
+        <AuthBody>We’ll take three photos on a countdown: looking straight ahead, then with your head turned to the left and to the right.</AuthBody>
       </View>
       <View style={{ gap: 16, marginTop: 28 }}>
         <Row icon="glasses-outline" text="Take off sunglasses, and keep your hair off your face" />
         <Row icon="bulb-outline" text="Face a light so your face is clear" />
-        <Row icon="wifi-outline" text="This step needs an internet connection" />
+        <Row icon="wifi-outline" text="The photos are sent securely when you finish, so stay connected" />
       </View>
       <View style={{ flex: 1, minHeight: 24 }} />
       <PillButton

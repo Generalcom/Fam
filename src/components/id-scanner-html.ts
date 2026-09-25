@@ -4,8 +4,8 @@
  *      searched around the on-screen guide so it can say "move closer", "move back" or "centre it";
  *   2. measures focus, glare and light inside that rectangle and whether it has held still;
  *   3. once everything is good for about 0.7 s it takes the photo by itself, cropped to the document.
- * Then it reads the text off the photo with Tesseract.js (an open-source OCR engine, loaded from jsDelivr in the
- * background while the person lines the document up) and sends the text to the app, which parses it.
+ * Nothing is read off the photo here: it is uploaded, and the identity-check server (server/kyc-worker) reads it.
+ * The page needs no downloads, only the camera.
  *
  * It draws its own guide frame (colour changes, progress, a faint picture of what is wanted) so the frame and the
  * detection always use the same geometry. The app draws the title, hints, buttons and the results.
@@ -32,11 +32,6 @@ export const ID_SCANNER_HTML = String.raw`<!doctype html>
 <div id="flash"></div>
 <script>
 (function () {
-var TESS_VERSION = '5.1.1';
-var TESS_BASE = 'https://cdn.jsdelivr.net/npm/tesseract.js@' + TESS_VERSION + '/dist/';
-var TESS_CORE = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@' + TESS_VERSION;
-var TESS_LANG = 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int';
-
 // ---- tuning
 var ANALYSE_W = 288;          // frames are analysed at this width
 var ANALYSE_EVERY_MS = 100;
@@ -372,74 +367,6 @@ function takePhoto(elm, rect, viaSnap) {
   var image = c.toDataURL('image/jpeg', 0.9).replace(/^data:image\/jpeg;base64,/, '');
   paint('#22C55E', 1);
   post({ type: 'captured', image: image, width: c.width, height: c.height, via: viaSnap ? 'manual' : 'auto', quality: q, tilt: Math.round(rect.th * 180 / Math.PI * 10) / 10, ms: Math.round(performance.now() - startedAt) });
-  if (cfg.ocr) readText(c);
-}
-
-// ---- reading the text (Tesseract.js, loaded on first use; started early in the background)
-var worker = null, workerP = null;
-function loadOcr() {
-  if (workerP) return workerP;
-  workerP = new Promise(function (res, rej) {
-    var s = document.createElement('script');
-    s.src = TESS_BASE + 'tesseract.min.js';
-    s.onload = res; s.onerror = function () { rej(new Error('The text reader could not be loaded.')); };
-    document.head.appendChild(s);
-  }).then(function () {
-    return window.Tesseract.createWorker('eng', 1, { workerPath: TESS_BASE + 'worker.min.js', corePath: TESS_CORE, langPath: TESS_LANG, logger: function () {} });
-  }).then(function (w) { worker = w; return w; });
-  workerP.catch(function () { workerP = null; });
-  return workerP;
-}
-function prepare(canvas, fromY, toY, wantW) {
-  // grey, upscaled to about wantW wide, with the tones stretched so faint print is not lost
-  var sw = canvas.width, sh = canvas.height, y0 = Math.round(sh * fromY), hh = Math.round(sh * (toY - fromY));
-  var sc = Math.max(1, wantW / sw), out = document.createElement('canvas');
-  out.width = Math.round(sw * sc); out.height = Math.round(hh * sc);
-  var g = out.getContext('2d');
-  g.imageSmoothingQuality = 'high';
-  g.drawImage(canvas, 0, y0, sw, hh, 0, 0, out.width, out.height);
-  var img = g.getImageData(0, 0, out.width, out.height), p = img.data, hist = new Uint32Array(256), i;
-  for (i = 0; i < p.length; i += 4) { var l = (p[i] * 77 + p[i + 1] * 150 + p[i + 2] * 29) >> 8; p[i] = l; hist[l]++; }
-  var total = out.width * out.height, lo = 0, hi = 255, acc = 0;
-  for (i = 0; i < 256; i++) { acc += hist[i]; if (acc > total * 0.02) { lo = i; break; } }
-  acc = 0;
-  for (i = 255; i >= 0; i--) { acc += hist[i]; if (acc > total * 0.02) { hi = i; break; } }
-  var span = Math.max(40, hi - lo);
-  for (i = 0; i < p.length; i += 4) { var v = clamp(Math.round((p[i] - lo) * 255 / span), 0, 255); p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
-  g.putImageData(img, 0, 0);
-  return out;
-}
-function luhn(d) { var s = 0, i; for (i = 0; i < d.length; i++) { var n = +d[d.length - 1 - i]; if (i % 2) { n *= 2; if (n > 9) n -= 9; } s += n; } return s % 10 === 0; }
-function hasSaId(text) {
-  var t = text.replace(/[Oo]/g, '0').replace(/[Il|]/g, '1'), re = /(?:\d[ ]?){13}/g, m;
-  while ((m = re.exec(t))) { var digits = m[0].replace(/ /g, ''); if (digits.length === 13 && luhn(digits)) return true; }
-  return false;
-}
-async function readText(canvas) {
-  var t0 = performance.now();
-  try {
-    post({ type: 'ocr-progress', status: 'loading' });
-    var w = await loadOcr();
-    post({ type: 'ocr-progress', status: 'reading' });
-    var out = { engine: 'tesseract.js-' + TESS_VERSION, text: '', digits: '', mrz: '', confidence: 0 };
-    if (cfg.kind === 'sa_card_back') { post({ type: 'ocr', ocr: null }); return; }
-    await w.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '' });
-    var r = await w.recognize(prepare(canvas, 0, 1, 1600));
-    out.text = r.data.text || ''; out.confidence = Math.round(r.data.confidence || 0);
-    if (cfg.kind === 'passport') {
-      await w.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<' });
-      var rm = await w.recognize(prepare(canvas, 0.66, 1, 1800));
-      out.mrz = rm.data.text || '';
-    } else if (!hasSaId(out.text)) {
-      await w.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '0123456789 ' });
-      var rd = await w.recognize(prepare(canvas, 0, 1, 1600));
-      out.digits = rd.data.text || '';
-    }
-    out.ms = Math.round(performance.now() - t0);
-    post({ type: 'ocr', ocr: out });
-  } catch (e) {
-    post({ type: 'ocr', ocr: null, error: String(e && e.message || e) });
-  }
 }
 
 // ---- the loop
@@ -515,20 +442,18 @@ function step(now) {
 window.__cmd = function (json) {
   var c = JSON.parse(json);
   if (c.cmd === 'begin') {
-    cfg = { kind: c.kind, ratio: c.ratio, ocr: !!c.ocr };
+    cfg = { kind: c.kind, ratio: c.ratio };
     good = 0; misses = 0; recent = []; sharpSeen = []; snap = false; done = false; startedAt = performance.now();
     buildOverlay();
     try { var pr = video.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
     flash.style.opacity = '0';
     running = true;
     if (!looping) { looping = true; requestAnimationFrame(tick); }
-    if (cfg.ocr && cfg.kind !== 'sa_card_back') setTimeout(function () { loadOcr().catch(function () {}); }, 400);
   } else if (c.cmd === 'snap') snap = true;
   else if (c.cmd === 'torch' && track) { try { track.applyConstraints({ advanced: [{ torch: !!c.on }] }); } catch (e) {} }
   else if (c.cmd === 'stop') {
     running = false;
     if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
-    if (worker) { try { worker.terminate(); } catch (e) {} worker = null; workerP = null; }
   }
 };
 window.__debug = function () { return { good: good, sharpSeen: sharpSeen.slice(), running: running, done: done, last: lastFound }; };

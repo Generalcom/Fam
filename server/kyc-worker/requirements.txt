@@ -1,0 +1,5 @@
+httpx==0.28.1
+numpy==2.4.6
+onnxruntime==1.30.0
+opencv-python-headless==5.0.0.93
+pytesseract==0.3.13

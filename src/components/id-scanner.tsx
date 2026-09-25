@@ -1,17 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useCameraPermissions } from 'expo-camera';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, BackHandler, Image, Linking, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { BackHandler, Image, Linking, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 
 import { ID_SCANNER_BASE_URL, ID_SCANNER_HTML } from '@/components/id-scanner-html';
-import { readPassport, readSaDocument, EMPTY_READ, type IdRead } from '@/lib/id-parse';
 
 export type ScanKind = 'sa_card_front' | 'sa_card_back' | 'sa_book' | 'passport';
 
 export type ScanQuality = { light: number; glare: number; sharp: number };
 
-/** What the scanner hands back: the cropped photo, how it was taken, and what the text reader found on it. */
+/** What the scanner hands back: the cropped photo and how it was taken. The server reads the text later. */
 export type ScanResult = {
   base64: string;
   width: number;
@@ -19,9 +18,6 @@ export type ScanResult = {
   via: 'auto' | 'manual';
   quality: ScanQuality;
   tilt: number;
-  read: IdRead;
-  /** False when the text reader did not run or failed; the person then types the details. */
-  ocrRan: boolean;
 };
 
 type Progress = {
@@ -41,22 +37,18 @@ const CHECKS: { key: keyof Progress['checks']; label: string }[] = [
   { key: 'steady', label: 'Steady' },
 ];
 
-/** Reading needs a download the first time, so it may take a while: offer to skip after this, and give up after the next. */
-const SKIP_READING_AFTER_S = 8;
-const GIVE_UP_READING_AFTER_S = 60;
 const MANUAL_AFTER_MS = 12_000;
 const FALLBACK_AFTER_MS = 30_000;
 
 /**
  * The ID document camera. The page inside the WebView (see id-scanner-html) finds the document, checks focus, glare and
- * light, and takes the photo by itself once it has held still; then it reads the text. This screen shows the guidance
- * and lets the person confirm the photo and what was read from it.
+ * light, and takes the photo by itself once it has held still. This screen shows the guidance and lets the person
+ * confirm the photo.
  */
 export function IdScanner({
   kind,
   title,
   ratio,
-  read: shouldRead,
   onCapture,
   onCancel,
   onFallback,
@@ -65,8 +57,6 @@ export function IdScanner({
   title: string;
   /** Width over height of the document. */
   ratio: number;
-  /** Read the text off the photo (the back of a smart ID card has none worth reading). */
-  read: boolean;
   onCapture: (result: ScanResult) => void;
   onCancel: () => void;
   /** Use the ordinary camera instead, when this one cannot start. */
@@ -82,10 +72,7 @@ export function IdScanner({
   const [progress, setProgress] = useState<Progress | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [waited, setWaited] = useState(0);
-  const [shot, setShot] = useState<Omit<ScanResult, 'read' | 'ocrRan'> | null>(null);
-  const [ocr, setOcr] = useState<{ status: 'reading' | 'done' | 'failed'; read: IdRead }>({ status: 'reading', read: EMPTY_READ });
-  const [ocrPhase, setOcrPhase] = useState<'loading' | 'reading'>('loading');
-  const [readWaited, setReadWaited] = useState(0);
+  const [shot, setShot] = useState<ScanResult | null>(null);
 
   useEffect(() => {
     if (permission && !permission.granted && permission.canAskAgain) void requestPermission();
@@ -106,16 +93,6 @@ export function IdScanner({
     return () => clearInterval(timer);
   }, [ready, shot, failure]);
 
-  useEffect(() => {
-    if (!shot || !shouldRead || ocr.status !== 'reading') return;
-    const timer = setInterval(() => setReadWaited((s) => s + 1), 1000);
-    return () => clearInterval(timer);
-  }, [shot, shouldRead, ocr.status]);
-
-  useEffect(() => {
-    if (readWaited >= GIVE_UP_READING_AFTER_S && ocr.status === 'reading') setOcr({ status: 'failed', read: EMPTY_READ });
-  }, [readWaited, ocr.status]);
-
   const send = useCallback((command: object) => {
     web.current?.injectJavaScript('window.__cmd(' + JSON.stringify(JSON.stringify(command)) + '); true;');
   }, []);
@@ -124,11 +101,8 @@ export function IdScanner({
     setShot(null);
     setProgress(null);
     setWaited(0);
-    setOcr({ status: 'reading', read: EMPTY_READ });
-    setOcrPhase('loading');
-    setReadWaited(0);
-    send({ cmd: 'begin', kind, ratio, ocr: shouldRead });
-  }, [send, kind, ratio, shouldRead]);
+    send({ cmd: 'begin', kind, ratio });
+  }, [send, kind, ratio]);
 
   function retake() {
     begin();
@@ -164,20 +138,7 @@ export function IdScanner({
           quality: msg.quality as ScanQuality,
           tilt: Number(msg.tilt ?? 0),
         });
-        if (!shouldRead) setOcr({ status: 'done', read: EMPTY_READ });
         break;
-      case 'ocr-progress':
-        setOcrPhase(msg.status === 'reading' ? 'reading' : 'loading');
-        break;
-      case 'ocr': {
-        const raw = msg.ocr as { text?: string; digits?: string; mrz?: string } | null;
-        if (!raw) {
-          setOcr({ status: msg.error ? 'failed' : 'done', read: EMPTY_READ });
-        } else {
-          setOcr({ status: 'done', read: kind === 'passport' ? readPassport(raw) : readSaDocument(raw) });
-        }
-        break;
-      }
       case 'error':
         setFailure(String(msg.message));
         break;
@@ -194,7 +155,7 @@ export function IdScanner({
   function accept() {
     if (!shot) return;
     send({ cmd: 'stop' });
-    onCapture({ ...shot, read: ocr.read, ocrRan: ocr.status === 'done' && shouldRead });
+    onCapture(shot);
   }
 
   if (!permission) return <View style={styles.root} />;
@@ -222,7 +183,6 @@ export function IdScanner({
       { ok: q.glare < 0.06, label: 'No glare' },
       { ok: q.light >= 60 && q.light <= 225, label: 'Good light' },
     ];
-    const r = ocr.read;
     return (
       <View style={styles.root}>
         <View style={[styles.top, { alignItems: 'center' }]}>
@@ -239,35 +199,9 @@ export function IdScanner({
               </View>
             ))}
           </View>
-          {shouldRead && (
-            <View accessibilityLiveRegion="polite" style={{ marginTop: 14, alignItems: 'center', gap: 4 }}>
-              {ocr.status === 'reading' ? (
-                <View style={{ alignItems: 'center', gap: 10 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <ActivityIndicator color="#fff" />
-                    <Text style={styles.body}>{ocrPhase === 'reading' ? 'Reading your ID…' : 'Getting the reader ready…'}</Text>
-                  </View>
-                  {ocrPhase === 'loading' && <Text style={[styles.body, { fontSize: 13 }]}>The first time it downloads a little over 7 MB, so it can take a minute.</Text>}
-                  {readWaited >= SKIP_READING_AFTER_S && (
-                    <Pressable accessibilityRole="button" onPress={() => setOcr({ status: 'failed', read: EMPTY_READ })} style={{ minHeight: 44, justifyContent: 'center' }}>
-                      <Text style={styles.link}>Skip reading, I'll type it in</Text>
-                    </Pressable>
-                  )}
-                </View>
-              ) : r.idNumber || r.fullName ? (
-                <>
-                  <Text style={styles.body}>We read from your ID (you can correct it next):</Text>
-                  {r.fullName && <Text style={styles.read}>{r.fullName}</Text>}
-                  {r.idNumber && <Text style={styles.read}>{r.idNumber}</Text>}
-                </>
-              ) : (
-                <Text style={styles.body}>We could not read the details, so you will type them in next.</Text>
-              )}
-            </View>
-          )}
         </View>
         <View style={styles.actions}>
-          <Pressable accessibilityRole="button" onPress={accept} disabled={ocr.status === 'reading'} style={[styles.pill, { opacity: ocr.status === 'reading' ? 0.5 : 1 }]}>
+          <Pressable accessibilityRole="button" onPress={accept} style={styles.pill}>
             <Text style={styles.pillText}>Use this photo</Text>
           </Pressable>
           <Pressable accessibilityRole="button" onPress={retake} style={{ minHeight: 48, justifyContent: 'center' }}>
@@ -372,7 +306,6 @@ const styles = StyleSheet.create({
   chip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, height: 28, borderRadius: 14 },
   chipText: { color: '#fff', fontSize: 13, fontWeight: '500' },
   reviewPanel: { position: 'absolute', left: 0, right: 0, paddingHorizontal: 24 },
-  read: { color: '#fff', fontSize: 18, fontWeight: '600', letterSpacing: 0.3 },
   actions: { position: 'absolute', left: 0, right: 0, bottom: 40, alignItems: 'center', gap: 6, paddingHorizontal: 32 },
   pill: { minHeight: 52, minWidth: 220, borderRadius: 26, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28 },
   pillText: { color: '#0D0D0D', fontSize: 17, fontWeight: '600' },

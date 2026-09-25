@@ -77,7 +77,7 @@ function Navigator() {
 
   const signedIn = !!session;
   const needsAvatar = signedIn && avatarSupported && !me?.avatar;
-  const needsVerify = signedIn && checksKyc && (kyc.status === 'none' || kyc.status === 'rejected');
+  const needsVerify = signedIn && checksKyc && (kyc.status === 'none' || kyc.status === 'rejected' || kyc.justSubmitted);
   const enrolled = signedIn && !needsAvatar && !needsVerify;
 
   return (

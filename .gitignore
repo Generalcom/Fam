@@ -42,3 +42,9 @@ example
 # generated native folders
 /ios
 /android
+
+# identity-check server: downloaded at image build time, and Python caches
+server/kyc-worker/models/face_detection_yunet_2023mar.onnx
+server/kyc-worker/models/face_recognition_sface_2021dec.onnx
+__pycache__/
+.pytest_cache/

@@ -7,8 +7,8 @@ import { useAuth } from '@/providers/auth';
 /**
  * loading  - asking the server
  * none     - nothing submitted yet
- * pending  - submitted, waiting for a reviewer
- * verified / rejected - the reviewer's decision
+ * pending  - submitted, waiting for the automatic check (server/kyc-worker), usually a few minutes
+ * verified / rejected - the check's (or a reviewer's) decision
  * missing  - supabase/enrolment.sql has not been run
  */
 export type KycStatus = 'loading' | 'none' | 'pending' | 'verified' | 'rejected' | 'missing' | 'error';
@@ -20,6 +20,9 @@ type KycValue = {
   /** Development builds only: lets a developer past the identity check. Ignored in release builds. */
   skipped: boolean;
   skipForDev: () => void;
+  /** Just sent: the "we're checking, it can take up to 15 minutes" page stays up until the person moves on. */
+  justSubmitted: boolean;
+  setJustSubmitted: (value: boolean) => void;
 };
 
 const KycContext = createContext<KycValue | null>(null);
@@ -75,9 +78,11 @@ export function KycProvider({ children }: { children: ReactNode }) {
     if (__DEV__) setSkipped(true);
   }, []);
 
+  const [justSubmitted, setJustSubmitted] = useState(false);
+
   const value = useMemo(
-    () => ({ status, rejectReason, refresh, skipped, skipForDev }),
-    [status, rejectReason, refresh, skipped, skipForDev],
+    () => ({ status, rejectReason, refresh, skipped, skipForDev, justSubmitted, setJustSubmitted }),
+    [status, rejectReason, refresh, skipped, skipForDev, justSubmitted],
   );
   return <KycContext.Provider value={value}>{children}</KycContext.Provider>;
 }
