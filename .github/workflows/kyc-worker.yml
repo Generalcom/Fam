@@ -1,0 +1,85 @@
+# Tests the identity-check server and publishes its Docker image to GitHub's container registry:
+#   ghcr.io/<owner>/fam-kyc-worker:latest   (the newest build of main)
+#   ghcr.io/<owner>/fam-kyc-worker:sha-<commit>
+# Pull requests are tested and built but not published. Run it by hand from the Actions tab too.
+name: kyc-worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/kyc-worker/**'
+      - '.github/workflows/kyc-worker.yml'
+  pull_request:
+    paths:
+      - 'server/kyc-worker/**'
+      - '.github/workflows/kyc-worker.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: kyc-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/kyc-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: server/kyc-worker/requirements*.txt
+      - name: Install Tesseract
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng fonts-dejavu-core
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image name
+        # Registry names must be lower case.
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fam-kyc-worker" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: server/kyc-worker
+          load: true
+          tags: kyc-worker:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test
+        # The image starts and loads all its models (the downloaded ones are hash-checked while building).
+        run: docker run --rm kyc-worker:test python -c "from kyc_worker.faces import FaceChecks; FaceChecks(); print('models load')"
+      - name: Publish
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: server/kyc-worker
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
