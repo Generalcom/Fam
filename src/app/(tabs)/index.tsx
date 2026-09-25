@@ -1,10 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Linking, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { FamilyMenu, type FamilyRow } from '@/components/family-menu';
-import { OsmMap, type BuildingRef, type MapMarker, type OsmMapHandle, type ZoneShape } from '@/components/osm-map';
+import { NavPanel } from '@/components/nav-panel';
+import { OsmMap, type BuildingRef, type MapMarker, type OsmMapHandle, type RouteDrawing, type ZoneShape } from '@/components/osm-map';
 import { PlaceCard } from '@/components/place-card';
 import { Text } from '@/components/ui';
 import { ZoneBanner, type ZoneAlert } from '@/components/zone-banner';
@@ -17,8 +19,9 @@ import { useTheme } from '@/hooks/use-theme';
 import { avatarDataUri } from '@/lib/avatar';
 import { isStale, memberStatus, placeLabel } from '@/lib/format';
 import { loadInitialView, NEAR_ZOOM, rememberPosition, type InitialView } from '@/lib/initial-view';
-import { getDeviceFix, getLastKnownFix } from '@/lib/location';
-import { directionsUrl } from '@/lib/route';
+import { getDeviceFix, getLastKnownFix, toMemberLocation, watchNavigation } from '@/lib/location';
+import { isOffRoute, progressAlong } from '@/lib/navigation';
+import { directionsUrl, metresBetween, WALK_UNDER_M, type TravelMode } from '@/lib/route';
 import type { Member, MemberLocation, PresenceState, ZoneLevel } from '@/lib/types';
 import { alertLevel, alertText, DEFAULT_RADIUS_M, describeHit, zonesAt, type ZoneHit } from '@/lib/zones';
 import { useCircle } from '@/providers/circle';
@@ -26,6 +29,12 @@ import { useCircle } from '@/providers/circle';
 const FOCUS_ZOOM = 16;
 /** Closer in while a person's location card is open. */
 const CARD_ZOOM = 17;
+/** How close the map follows you while navigating. */
+const NAV_ZOOM = 17;
+/** The whole route is shown this long before the map starts following you. */
+const OVERVIEW_MS = 4000;
+/** Until the navigation sheet has been measured, how much of the bottom of the screen it covers. */
+const NAV_SHEET_ESTIMATE = 170;
 /** Until the card has been measured, how much of the bottom of the screen it covers. */
 const CARD_ESTIMATE = 470;
 /** The same guess for the new-zone sheet. */
@@ -52,13 +61,25 @@ export default function MapScreen() {
   const [zoneError, setZoneError] = useState<string | null>(null);
   const cardHeight = useRef(CARD_ESTIMATE);
   const centeredOnSelf = useRef(false);
+  const [mode, setMode] = useState<TravelMode>('drive');
+  const [showDetails, setShowDetails] = useState(false);
+  const [following, setFollowing] = useState(true);
+  const [navFix, setNavFix] = useState<MemberLocation | null>(null);
+  const [offRoute, setOffRoute] = useState(false);
+  const followAfter = useRef(0);
+  const navSheetHeight = useRef(NAV_SHEET_ESTIMATE);
+  const router = useRouter();
+  const { focus } = useLocalSearchParams<{ focus?: string }>();
+
+  // Choosing someone else starts navigation to them straight away.
+  const wantsNav = !!selectedId && selectedId !== me?.id;
 
   const canShowSelf = permission === 'foreground' || permission === 'background';
   const sharingOn = me?.sharing_enabled ?? false;
 
   // Your own position comes straight from this phone (fresher than the server copy, and it still works
-  // while sharing is paused). Everyone else's comes from the server.
-  const localFix = myFix ?? deviceFix;
+  // while sharing is paused), every second while navigating. Everyone else's comes from the server.
+  const localFix = (wantsNav ? navFix : null) ?? myFix ?? deviceFix;
   const live: Record<string, MemberLocation> = me && localFix ? { ...locations, [me.id]: localFix } : locations;
   const myLoc = me ? live[me.id] : undefined;
 
@@ -173,6 +194,27 @@ export default function MapScreen() {
   }, [canShowSelf, me?.id]);
 
   useEffect(() => {
+    if (!wantsNav || !canShowSelf || !me) {
+      setNavFix(null);
+      return;
+    }
+    let cancelled = false;
+    let sub: { remove: () => void } | null = null;
+    watchNavigation((loc) => {
+      if (!cancelled) setNavFix(toMemberLocation(me.id, loc));
+    })
+      .then((s) => {
+        if (cancelled) s.remove();
+        else sub = s;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      sub?.remove();
+    };
+  }, [wantsNav, canShowSelf, me?.id]);
+
+  useEffect(() => {
     if (!startView && localFix) {
       setStartView({ lat: localFix.latitude, lng: localFix.longitude, zoom: NEAR_ZOOM, source: 'fix' });
     }
@@ -197,19 +239,45 @@ export default function MapScreen() {
   const selectedRow = selectedId ? rows.find((r) => r.member.user_id === selectedId) : undefined;
   const selectedLoc = selectedId ? live[selectedId] : undefined;
   const selectedBuilding = selectedId ? buildings[selectedId] : undefined;
-  const other = !!selectedId && selectedId !== me?.id;
+  const other = wantsNav;
+  const navigating = wantsNav && !!self;
   const target = other && selectedLoc ? { lat: selectedLoc.latitude, lng: selectedLoc.longitude } : null;
-  const { route, loading: routing } = useRoute(other ? self : null, target, other ? selectedId : null);
+  const { route, loading: routing } = useRoute(other ? self : null, target, other ? selectedId : null, mode, offRoute);
   const fittedRoute = useRef<string | null>(null);
+  const progress = route && self && target && selectedRow ? progressAlong(route, self, target, selectedRow.name, myLoc?.accuracy ?? null) : null;
+  const leftRoute = !!progress && !progress.arrived && isOffRoute(progress, myLoc?.accuracy ?? null);
+  useEffect(() => setOffRoute(leftRoute), [leftRoute]);
 
-  // When the route first arrives the view is fitted to all of it, once; after that the person is left to pan and zoom.
+  // The line still ahead of you, plus dotted links from you to the road and from the road to them when the route
+  // starts or ends some way off (it runs along roads and paths, never straight across).
+  const drawing: RouteDrawing | null = route
+    ? {
+        line: progress && !progress.arrived ? progress.ahead : route.coordinates,
+        walking: route.mode === 'walk',
+        links: [
+          ...(self && progress && progress.offRouteM > 8 ? [[[self.lng, self.lat], progress.snapped] as [number, number][]] : []),
+          ...(target && metresBetween(target, { lng: route.coordinates[route.coordinates.length - 1][0], lat: route.coordinates[route.coordinates.length - 1][1] }) > 8
+            ? [[route.coordinates[route.coordinates.length - 1], [target.lng, target.lat]] as [number, number][]]
+            : []),
+        ],
+      }
+    : null;
+
+  // When a route first arrives the view is fitted to all of it, once; then, while navigating, the map follows you.
   useEffect(() => {
-    if (!route || !selectedId || fittedRoute.current === selectedId) return;
-    fittedRoute.current = selectedId;
+    const fitKey = selectedId ? `${selectedId}:${mode}` : null;
+    if (!route || !fitKey || fittedRoute.current === fitKey) return;
+    fittedRoute.current = fitKey;
     const step = Math.max(1, Math.floor(route.coordinates.length / 40));
     const points = route.coordinates.filter((_, i) => i % step === 0 || i === route.coordinates.length - 1).map(([lng, lat]) => ({ lat, lng }));
     fitTo(points);
-  }, [route, selectedId]);
+    followAfter.current = Date.now() + OVERVIEW_MS;
+  }, [route, selectedId, mode]);
+
+  useEffect(() => {
+    if (!navigating || !following || showDetails || !self || Date.now() < followAfter.current) return;
+    mapRef.current?.flyTo(self.lat, self.lng, NAV_ZOOM, true, navSheetHeight.current + space.md * 2);
+  }, [navigating, following, showDetails, self?.lat, self?.lng]);
   const cardStatus =
     selectedRow && selectedId
       ? memberStatus(selectedRow.member.profile, selectedLoc, now, selectedId !== me?.id && myLoc ? { latitude: myLoc.latitude, longitude: myLoc.longitude } : undefined)
@@ -225,6 +293,15 @@ export default function MapScreen() {
   useEffect(() => {
     if (selectedId && !selectedLoc) setSelectedId(null);
   }, [selectedId, selectedLoc]);
+
+  // Tapping someone on the Family tab opens the map on them (see family.tsx).
+  const focusLoc = focus ? live[focus] : undefined;
+  useEffect(() => {
+    if (!focus || !mapReady || !focusLoc) return;
+    const member = members.find((m) => m.user_id === focus);
+    if (member) selectMember(member);
+    router.setParams({ focus: undefined });
+  }, [focus, mapReady, !!focusLoc]);
 
   useEffect(() => {
     if (!selectedId && !draft) mapRef.current?.setPadding(0);
@@ -275,7 +352,12 @@ export default function MapScreen() {
     if (!loc) return;
     setDraft(null);
     setSelectedId(member.user_id);
+    setShowDetails(false);
+    setFollowing(true);
+    followAfter.current = Date.now() + OVERVIEW_MS;
     fittedRoute.current = null;
+    // On foot when they are close by, otherwise by road. Either can be changed in the navigation panel.
+    if (self) setMode(metresBetween(self, { lat: loc.latitude, lng: loc.longitude }) < WALK_UNDER_M ? 'walk' : 'drive');
     if (member.user_id === me?.id || !self) {
       mapRef.current?.flyTo(loc.latitude, loc.longitude, CARD_ZOOM, true, cardHeight.current + space.md * 2);
     } else {
@@ -293,7 +375,8 @@ export default function MapScreen() {
           start={startView}
           markers={markers}
           avatars={avatars}
-          route={route?.coordinates ?? null}
+          route={drawing}
+          onUserMove={() => setFollowing(false)}
           zones={zoneShapes}
           people={people}
           onReady={() => {
@@ -316,7 +399,7 @@ export default function MapScreen() {
         </View>
       )}
 
-      <View style={[styles.top, { top: insets.top + space.sm }]} pointerEvents="box-none">
+      <View style={[styles.top, { top: insets.top + space.sm + (navigating && !showDetails && !draft ? 110 : 0) }]} pointerEvents="box-none">
         <ZoneBanner alerts={alerts} />
         {mapProblem && (
           <View style={[styles.banner, { backgroundColor: theme.warningBg }]}>
@@ -355,6 +438,28 @@ export default function MapScreen() {
           onSave={(input) => void saveZone(input)}
           onCancel={() => setDraft(null)}
         />
+      ) : navigating && !showDetails && selectedRow && selectedLoc && target && self ? (
+        <NavPanel
+          name={selectedRow.name}
+          color={selectedRow.member.profile.color}
+          avatar={selectedRow.member.profile.avatar}
+          progress={progress}
+          loading={routing}
+          mode={mode}
+          following={following}
+          onMode={setMode}
+          onRecenter={() => {
+            followAfter.current = 0;
+            setFollowing(true);
+            mapRef.current?.flyTo(self.lat, self.lng, NAV_ZOOM, true, navSheetHeight.current + space.md * 2);
+          }}
+          onDetails={() => setShowDetails(true)}
+          onOpenMaps={() => void Linking.openURL(directionsUrl(self, target, mode))}
+          onEnd={() => setSelectedId(null)}
+          onLayout={(event) => {
+            navSheetHeight.current = event.nativeEvent.layout.height;
+          }}
+        />
       ) : selectedRow && selectedLoc ? (
         <PlaceCard
           key={selectedRow.member.user_id}
@@ -370,8 +475,8 @@ export default function MapScreen() {
           loadingInfo={loadingInfo}
           route={route}
           routing={routing}
-          directions={other && self && target ? directionsUrl(self, target) : null}
-          onClose={() => setSelectedId(null)}
+          directions={other && self && target ? directionsUrl(self, target, mode) : null}
+          onClose={() => (navigating ? setShowDetails(false) : setSelectedId(null))}
           onLayout={(event) => {
             const height = event.nativeEvent.layout.height;
             // The card is measured after it appears; nudge the map if the guess was well off.

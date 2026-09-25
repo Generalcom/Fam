@@ -12,7 +12,7 @@ import { useKyc, type KycStatus } from '@/providers/kyc';
 
 const KYC_LABEL: Partial<Record<KycStatus, string>> = {
   verified: 'Verified. Thank you.',
-  pending: 'Submitted. A reviewer will check your documents soon.',
+  pending: 'Submitted. Checking your details can take up to 15 minutes.',
   rejected: 'Not accepted. Open the app again to submit new photos.',
   none: 'Not done yet.',
   loading: 'Checking…',

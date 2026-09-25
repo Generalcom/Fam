@@ -1,6 +1,5 @@
 import { File } from 'expo-file-system';
 
-import { sameText, type IdRead } from '@/lib/id-parse';
 import { base64ToBytes } from '@/lib/id-number';
 import { supabase } from '@/lib/supabase';
 
@@ -53,31 +52,13 @@ export const DOCUMENTS: DocumentOption[] = [
   },
 ];
 
-export type LivenessStep = { challenge: 'left' | 'right'; ok: boolean; ms: number; peak: number };
-
-/** The live-face check (Minivision's Silent-Face-Anti-Spoofing) over the straight-ahead frames. It passes (real) when the mean chance the face is live is 0.6 or more. */
-export type AntiSpoof = {
-  model: string;
-  frames: number;
-  realProb: number;
-  min: number;
-  max: number;
-  real: boolean;
-  /** Set by the app when the check failed on every try and the person went on anyway: a reviewer must look closely. */
-  reviewFlag?: boolean;
-  attempts?: number;
-};
-
-/** What the head-turn check produced: three JPEGs (base64) and how each step went. */
-export type LivenessResult = {
+/** The three selfie photos (JPEG, base64) and the order the head turns were asked for. */
+export type SelfieResult = {
   center: string;
   left: string;
   right: string;
-  steps: LivenessStep[];
+  order: ('left' | 'right')[];
   durationMs: number;
-  model: string;
-  /** Null when the models were not available on the phone. */
-  antiSpoof: AntiSpoof | null;
 };
 
 /** A captured photo: a file on the phone (the basic camera) or JPEG data straight from the document scanner. */
@@ -98,9 +79,7 @@ export type KycInput = {
   back: Photo | null;
   frontNote: ScanNote;
   backNote: ScanNote | null;
-  /** What the text reader found on the front, if it ran. */
-  read: IdRead | null;
-  liveness: LivenessResult;
+  selfie: SelfieResult;
 };
 
 async function readPhoto(photo: Photo): Promise<Uint8Array> {
@@ -116,16 +95,17 @@ function friendly(message: string): string {
 
 /**
  * Uploads the photos to the private "kyc" bucket, then records the submission. Nothing is readable back by the
- * app afterwards. The phone's copies of the ID photos are deleted once they are safely uploaded.
+ * app afterwards. The phone's copies of the ID photos are deleted once they are safely uploaded. The identity-check
+ * server (server/kyc-worker) then reads the ID and checks the selfie, and sets the status, usually within minutes.
  */
 export async function submitKyc(input: KycInput, onProgress?: (done: number, total: number) => void): Promise<void> {
   const folder = `${input.userId}/${Date.now()}`;
   const files: { key: 'front' | 'back' | 'center' | 'left' | 'right'; bytes: () => Promise<Uint8Array> }[] = [
     { key: 'front', bytes: () => readPhoto(input.front) },
     ...(input.back ? [{ key: 'back' as const, bytes: () => readPhoto(input.back as Photo) }] : []),
-    { key: 'center', bytes: async () => base64ToBytes(input.liveness.center) },
-    { key: 'left', bytes: async () => base64ToBytes(input.liveness.left) },
-    { key: 'right', bytes: async () => base64ToBytes(input.liveness.right) },
+    { key: 'center', bytes: async () => base64ToBytes(input.selfie.center) },
+    { key: 'left', bytes: async () => base64ToBytes(input.selfie.left) },
+    { key: 'right', bytes: async () => base64ToBytes(input.selfie.right) },
   ];
 
   const paths: Record<string, string> = {};
@@ -155,28 +135,8 @@ export async function submitKyc(input: KycInput, onProgress?: (done: number, tot
       selfie_center_path: paths.center,
       selfie_left_path: paths.left,
       selfie_right_path: paths.right,
-      liveness: {
-        version: 1,
-        source: 'phone',
-        model: input.liveness.model,
-        steps: input.liveness.steps,
-        durationMs: input.liveness.durationMs,
-        antiSpoof: input.liveness.antiSpoof,
-      },
-      scan: {
-        front: input.frontNote,
-        back: input.backNote,
-        ocr: input.read
-          ? {
-              engine: 'tesseract.js-5.1.1',
-              source: input.read.source,
-              idNumber: input.read.idNumber,
-              fullName: input.read.fullName,
-              mrzValid: input.read.mrz ? input.read.mrz.valid : null,
-              matchesTyped: { idNumber: sameText(input.read.idNumber, input.idNumber), fullName: sameText(input.read.fullName, input.fullName) },
-            }
-          : null,
-      },
+      liveness: { version: 2, source: 'server', order: input.selfie.order, durationMs: input.selfie.durationMs },
+      scan: { front: input.frontNote, back: input.backNote },
       consent_version: CONSENT_VERSION,
       consented_at: new Date().toISOString(),
       reviewed_at: null,

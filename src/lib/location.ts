@@ -138,6 +138,14 @@ export function watchForeground(
   );
 }
 
+/**
+ * Every second, as precisely as the phone can, for turn-by-turn navigation. Only used on this phone while
+ * navigating; what the family sees still comes from watchForeground.
+ */
+export function watchNavigation(onFix: (loc: Location.LocationObject) => void): Promise<Location.LocationSubscription> {
+  return Location.watchPositionAsync({ accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1_000, distanceInterval: 0 }, onFix);
+}
+
 export function toMemberLocation(userId: string, loc: Location.LocationObject): MemberLocation {
   return {
     user_id: userId,

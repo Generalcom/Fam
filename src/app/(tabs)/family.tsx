@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
+import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { Alert, Pressable, Share, View } from 'react-native';
 
@@ -17,6 +18,7 @@ export default function FamilyScreen() {
   const { circle, me, myRole, members, locations, leaveCircle, removeMember, rotateInviteCode, zones, zonesStatus, deleteZone } =
     useCircle();
   const [copied, setCopied] = useState(false);
+  const router = useRouter();
 
   if (!circle) return null;
   const isAdmin = myRole === 'admin';
@@ -52,6 +54,15 @@ export default function FamilyScreen() {
         onPress: () => rotateInviteCode().catch((e: Error) => Alert.alert('Could not change code', e.message)),
       },
     ]);
+  }
+
+  // Opens the map on them: navigation to someone else, your own location card for you.
+  function showOnMap(userId: string, name: string, isMe: boolean) {
+    if (!isMe && !locations[userId]) {
+      Alert.alert(`${name} isn't sharing their location`, 'You can navigate to them once they turn sharing on.');
+      return;
+    }
+    router.navigate({ pathname: '/', params: { focus: userId } });
   }
 
   function confirmRemove(userId: string, name: string) {
@@ -119,17 +130,25 @@ export default function FamilyScreen() {
                 borderTopWidth: i === 0 ? 0 : 1,
                 borderTopColor: theme.border,
               }}>
-              <Avatar name={name} color={m.profile.color} avatar={m.profile.avatar} />
-              <View style={{ flex: 1 }}>
-                <Text variant="label" numberOfLines={1}>
-                  {name}
-                  {isMe ? ' (you)' : ''}
-                  {m.role === 'admin' ? ' · Admin' : ''}
-                </Text>
-                <Text variant="caption" color="textSecondary">
-                  {status}
-                </Text>
-              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={isMe ? 'Show me on the map' : `Navigate to ${name}`}
+                accessibilityHint={status}
+                onPress={() => showOnMap(m.user_id, name, isMe)}
+                style={({ pressed }) => ({ flex: 1, flexDirection: 'row', alignItems: 'center', gap: space.md, opacity: pressed ? 0.6 : 1 })}>
+                <Avatar name={name} color={m.profile.color} avatar={m.profile.avatar} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="label" numberOfLines={1}>
+                    {name}
+                    {isMe ? ' (you)' : ''}
+                    {m.role === 'admin' ? ' · Admin' : ''}
+                  </Text>
+                  <Text variant="caption" color="textSecondary">
+                    {status}
+                  </Text>
+                </View>
+                {!isMe && locations[m.user_id] && <Ionicons name="navigate-outline" size={20} color={theme.primary} />}
+              </Pressable>
               {isAdmin && !isMe && (
                 <Pressable
                   accessibilityRole="button"

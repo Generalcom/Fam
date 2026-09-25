@@ -1,0 +1,7 @@
+.env
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+models/face_detection_yunet_2023mar.onnx
+models/face_recognition_sface_2021dec.onnx

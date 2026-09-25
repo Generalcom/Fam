@@ -3,12 +3,18 @@
 --
 -- What is stored, and who can read it:
 --   * profiles.avatar        the icon options (a few hundred bytes). Circle-mates can read it, like the name.
---   * kyc_submissions        one row per person: name and document number as typed, status, consent record.
---                            Only that person can read their own row. Reviewers use the dashboard / service role.
+--   * kyc_submissions        one row per person: name and document number as typed, status, consent record,
+--                            and the automatic check's scores (auto_check). Only that person can read their own row.
+--                            Reviewers and the check server (server/kyc-worker) use the dashboard / service role.
 --   * storage bucket "kyc"   PRIVATE. The ID photos and selfies. The app can upload into the person's own folder
 --                            (<user id>/...) and can NOT read, replace or delete anything afterwards.
 --
--- Review a submission (dashboard > SQL editor, runs as an admin):
+-- Automatic check: server/kyc-worker picks up each 'pending' submission within a minute or so, reads the ID (OCR),
+-- compares the selfie with the ID photo and checks the head turns and for a printed photo or screen, then sets the
+-- status to 'verified' or 'rejected' (with a reason the person sees), and records its scores in auto_check. Started
+-- with REVIEW_FAILURES=true it leaves failures 'pending' for a person instead. See server/kyc-worker/README.md.
+--
+-- Review a submission by hand (dashboard > SQL editor, runs as an admin):
 --   update public.kyc_submissions set status = 'verified', reviewed_at = now(), reviewed_by = 'your name'
 --    where user_id = '<user id>';
 --   update public.kyc_submissions set status = 'rejected', reject_reason = 'Photo of ID is unreadable',
@@ -71,11 +77,26 @@ alter table public.kyc_submissions drop constraint if exists kyc_scan_small;
 alter table public.kyc_submissions add constraint kyc_scan_small
   check (scan is null or octet_length(scan::text) <= 4000);
 
+-- What the automatic check found (scores and yes/no answers only; none of the text read off the ID), and when.
+alter table public.kyc_submissions add column if not exists auto_check jsonb;
+alter table public.kyc_submissions add column if not exists checked_at timestamptz;
+alter table public.kyc_submissions drop constraint if exists kyc_auto_check_small;
+alter table public.kyc_submissions add constraint kyc_auto_check_small
+  check (auto_check is null or octet_length(auto_check::text) <= 4000);
+
+create index if not exists kyc_waiting_for_check on public.kyc_submissions (submitted_at)
+  where status = 'pending' and checked_at is null;
+
+-- A new submission (or a resubmission after a rejection) is stamped with the time it was sent, and starts with no
+-- automatic result, whatever the app sent. Updates to a submission that is already pending (the check server writing
+-- its result) keep the original time.
 create or replace function public.kyc_stamp() returns trigger
 language plpgsql as $$
 begin
-  if new.status = 'pending' then
+  if tg_op = 'INSERT' or (new.status = 'pending' and old.status is distinct from 'pending') then
     new.submitted_at := now();
+    new.checked_at := null;
+    new.auto_check := null;
   end if;
   return new;
 end;
