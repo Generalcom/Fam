@@ -40,7 +40,18 @@ the error in `auto_check`.
 
 1. Run `supabase/enrolment.sql` again in the Supabase SQL editor (safe to repeat). It adds `auto_check` and
    `checked_at`, and makes sure a resubmission starts with a clean result.
-2. Build and run the container on any Docker host:
+2. Run the container on any Docker host. GitHub Actions (`.github/workflows/kyc-worker.yml`) tests the worker and
+   publishes the image to `ghcr.io/generalcom/fam-kyc-worker:latest` on every change to `main`, so you can pull it:
+
+   ```sh
+   docker run -d --restart unless-stopped \
+     -e SUPABASE_URL=https://your-project-ref.supabase.co \
+     -e SUPABASE_SERVICE_ROLE_KEY=... \
+     ghcr.io/generalcom/fam-kyc-worker:latest
+   ```
+
+   The package is private if the repository is: log in first with `docker login ghcr.io` (a GitHub token with
+   `read:packages`), or make the package public under the repository's Packages settings. Or build it yourself:
 
    ```sh
    cd server/kyc-worker
