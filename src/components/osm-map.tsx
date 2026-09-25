@@ -50,6 +50,12 @@ export type OsmMapHandle = {
   setPadding: (bottom: number) => void;
 };
 
+/**
+ * A route on the map, as [longitude, latitude] points: solid blue by road, blue dots on foot. `links` are the short
+ * pieces from each person to where the route meets the road or path, drawn as grey dots.
+ */
+export type RouteDrawing = { line: [number, number][]; walking: boolean; links: [number, number][][] };
+
 /** Where the map opens. It is applied once, when the page is created. */
 export type MapStart = { lat: number; lng: number; zoom: number };
 
@@ -58,8 +64,8 @@ type Props = {
   markers: MapMarker[];
   /** People's chosen icons by id, as SVG data addresses. Anyone missing is drawn as their initial. */
   avatars?: Record<string, string>;
-  /** A route to draw, as [longitude, latitude] points, or null for none. */
-  route?: [number, number][] | null;
+  /** A route to draw, or null for none. */
+  route?: RouteDrawing | null;
   zones: ZoneShape[];
   people: Person[];
   style?: StyleProp<ViewStyle>;
@@ -190,9 +196,17 @@ const HTML_TEMPLATE = `<!doctype html>
   }
 
   var pendingRoute;
-  function setRoute(line) {
+  function setRoute(r) {
     var source = map.getSource('route');
-    var data = line && line.length > 1 ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: line } } : { type: 'FeatureCollection', features: [] };
+    var features = [];
+    function add(kind, coords) {
+      if (coords && coords.length > 1) features.push({ type: 'Feature', properties: { kind: kind }, geometry: { type: 'LineString', coordinates: coords } });
+    }
+    if (r) {
+      add(r.walking ? 'walk' : 'drive', r.line);
+      (r.links || []).forEach(function (l) { add('link', l); });
+    }
+    var data = { type: 'FeatureCollection', features: features };
     if (!source) { pendingRoute = data; return; }
     source.setData(data);
   }
@@ -732,7 +746,7 @@ const HTML_TEMPLATE = `<!doctype html>
     else if (c.type === 'avatars') setAvatars(c.avatars);
     else if (c.type === 'people') setPeople(c.people);
     else if (c.type === 'zones') setZones(c.zones);
-    else if (c.type === 'route') setRoute(c.line);
+    else if (c.type === 'route') setRoute(c.route);
     else if (c.type === 'padding') map.easeTo({ padding: { top: 0, right: 0, left: 0, bottom: c.bottom }, duration: 250 });
     else if (c.type === 'flyTo') {
       // bottom keeps the target clear of anything covering the bottom of the map
@@ -777,9 +791,13 @@ const HTML_TEMPLATE = `<!doctype html>
     });
     if (pendingZones) { setZones(pendingZones); pendingZones = null; }
 
+    // The route is drawn over everything, 3D buildings included, so no part of it is ever hidden behind one.
     map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-    map.addLayer({ id: 'route-casing', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#FFFFFF', 'line-width': 9, 'line-opacity': 0.95 } }, groundAbove);
-    map.addLayer({ id: 'route-line', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#2563EB', 'line-width': 5 } }, groundAbove);
+    var width = ['interpolate', ['linear'], ['zoom'], 12, 4, 16, 6, 19, 9];
+    map.addLayer({ id: 'route-link', type: 'line', source: 'route', filter: ['==', ['get', 'kind'], 'link'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#6B7280', 'line-width': 4, 'line-dasharray': [0, 2] } });
+    map.addLayer({ id: 'route-casing', type: 'line', source: 'route', filter: ['==', ['get', 'kind'], 'drive'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#1E40AF', 'line-width': ['+', width, 3] } });
+    map.addLayer({ id: 'route-line', type: 'line', source: 'route', filter: ['==', ['get', 'kind'], 'drive'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#3B82F6', 'line-width': width } });
+    map.addLayer({ id: 'route-walk', type: 'line', source: 'route', filter: ['==', ['get', 'kind'], 'walk'], layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#2563EB', 'line-width': width, 'line-dasharray': [0, 1.6] } });
     if (pendingRoute) { map.getSource('route').setData(pendingRoute); pendingRoute = null; }
 
     map.addSource('presence', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
@@ -864,7 +882,7 @@ export const OsmMap = forwardRef<OsmMapHandle, Props>(function OsmMap(
     const payload = JSON.stringify(route ?? null);
     if (payload === lastRoute.current) return;
     lastRoute.current = payload;
-    send({ type: 'route', line: route ?? null });
+    send({ type: 'route', route: route ?? null });
   }, [readyToken, route, send]);
 
   useEffect(() => {
@@ -911,6 +929,7 @@ export const OsmMap = forwardRef<OsmMapHandle, Props>(function OsmMap(
       case 'ready':
         // A (re)loaded page starts empty, so forget what was last sent.
         lastMarkers.current = '';
+        lastRoute.current = '';
         lastPeople.current = '';
         lastZones.current = '';
         setReadyToken((t) => t + 1);

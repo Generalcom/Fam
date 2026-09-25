@@ -26,7 +26,7 @@ type Props = {
   info: PlaceInfo | null;
   loadingInfo: boolean;
   /** The road route to this person, when you are looking at someone else. */
-  route?: { distanceM: number; durationS: number } | null;
+  route?: { distanceM: number; durationS: number; mode?: 'drive' | 'walk' } | null;
   routing?: boolean;
   /** Where turn-by-turn directions to them open. Absent for yourself. */
   directions?: string | null;
@@ -228,9 +228,9 @@ export function PlaceCard({
 
           {directions && (
             <View style={styles.row} accessibilityLiveRegion="polite">
-              <Ionicons name="car-outline" size={20} color={theme.primary} style={styles.icon} />
+              <Ionicons name={route?.mode === 'walk' ? 'walk-outline' : 'car-outline'} size={20} color={theme.primary} style={styles.icon} />
               <Text variant="label" style={{ flex: 1 }}>
-                {route ? `${formatDuration(route.durationS)} · ${formatRouteDistance(route.distanceM)} by road` : routing ? 'Finding the route…' : 'Route not available'}
+                {route ? `${formatDuration(route.durationS)} · ${formatRouteDistance(route.distanceM)} ${route.mode === 'walk' ? 'on foot' : 'by road'}` : routing ? 'Finding the route…' : 'Route not available'}
               </Text>
             </View>
           )}
