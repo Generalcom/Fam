@@ -80,6 +80,10 @@ jobs:
         with:
           context: server/kyc-worker
           push: true
+          # A plain single-platform image, without the build-record (attestation) entries: some Docker versions
+          # cannot pick linux/amd64 out of a list that has them ("no matching manifest for linux/amd64").
+          provenance: false
+          sbom: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
