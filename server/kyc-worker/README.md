@@ -40,7 +40,11 @@ the error in `auto_check`.
 
 1. Run `supabase/enrolment.sql` again in the Supabase SQL editor (safe to repeat). It adds `auto_check` and
    `checked_at`, and makes sure a resubmission starts with a clean result.
-2. Run the container on any Docker host. GitHub Actions (`.github/workflows/kyc-worker.yml`) tests the worker and
+2. **On a Windows PC:** run `powershell -ExecutionPolicy Bypass -File .\run-on-windows.ps1` from this folder. It checks
+   Docker Desktop, asks for your Supabase details and saves them where only you can read them, downloads and starts
+   the worker, and offers to stop the PC sleeping. Run it again to update.
+
+   **Anywhere else:** run the container on any Docker host. GitHub Actions (`.github/workflows/kyc-worker.yml`) tests the worker and
    publishes the image to `ghcr.io/generalcom/fam-kyc-worker:latest` on every change to `main`, so you can pull it:
 
    ```sh
