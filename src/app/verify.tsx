@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { usePreventScreenCapture } from 'expo-screen-capture';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Image, Pressable, Text, View } from 'react-native';
 
 import {
@@ -81,6 +81,14 @@ export default function Verify() {
     doc.id === 'sa_id_card' ? (side === 'front' ? 'sa_card_front' : 'sa_card_back') : doc.id === 'sa_id_book' ? 'sa_book' : 'passport';
   const noteOf = (r: ScanResult): ScanNote => ({ via: r.via, sharp: r.quality.sharp, light: r.quality.light, glare: r.quality.glare, tilt: r.tilt });
 
+  // Rejected while the "we're checking" page is still up: back to the start, which shows the reason.
+  useEffect(() => {
+    if (step === 'submitted' && status === 'rejected') {
+      setJustSubmitted(false);
+      setStep('intro');
+    }
+  }, [step, status, setJustSubmitted]);
+
   useHardwareBack(step === 'document' || step === 'details' || step === 'selfie', () =>
     setStep(step === 'selfie' ? 'details' : step === 'details' ? 'document' : 'intro'),
   );
@@ -107,8 +115,8 @@ export default function Verify() {
         },
         (done, total) => setSent({ done, total }),
       );
+      await refresh();
       setStep('submitted');
-      void refresh();
     } catch (e) {
       setJustSubmitted(false);
       setFailure((e as Error).message);
